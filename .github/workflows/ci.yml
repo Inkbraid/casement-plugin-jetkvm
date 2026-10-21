@@ -13,6 +13,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # The end-to-end tests run against tools/fake-jetkvm and must not skip.
+  CASEMENT_E2E: "1"
 
 jobs:
   linux:
@@ -24,9 +26,21 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tools/fake-jetkvm/go.mod
+          cache-dependency-path: tools/fake-jetkvm/go.sum
+      - name: Build the fake JetKVM
+        working-directory: tools/fake-jetkvm
+        run: |
+          test -z "$(gofmt -l .)" || { gofmt -d .; exit 1; }
+          go vet ./...
+          go build -o "$RUNNER_TEMP/fake-jetkvm" .
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+        env:
+          FAKE_JETKVM: ${{ runner.temp }}/fake-jetkvm
 
   licences:
     name: Dependency licences
@@ -38,7 +52,7 @@ jobs:
           command: check licenses sources
 
   windows:
-    name: Windows build
+    name: Windows build and tests
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -46,14 +60,41 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tools/fake-jetkvm/go.mod
+          cache-dependency-path: tools/fake-jetkvm/go.sum
+      - name: Build the fake JetKVM
+        working-directory: tools/fake-jetkvm
+        run: go build -o "${{ runner.temp }}/fake-jetkvm.exe" .
+      # Windows Server leaves Media Foundation (the H.264 decoder) out.
+      - name: Media Foundation
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "$env:SystemRoot\System32\mfplat.dll")) {
+            Install-WindowsFeature Server-Media-Foundation
+          }
+          if (-not (Test-Path "$env:SystemRoot\System32\mfplat.dll")) { throw "no mfplat.dll" }
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo build --release
+      # The plugin loads Media Foundation itself, so that it starts (and
+      # says what is missing) on Windows N editions without it.
+      - name: No load-time dependency on Media Foundation
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
+          $deps = & $dumpbin.FullName /nologo /dependents target/release/casement-jetkvm.exe
+          $deps
+          if ($deps -match 'mf(plat|readwrite)\.dll') { throw "casement-jetkvm.exe imports Media Foundation" }
       - run: cargo test --release
+        env:
+          FAKE_JETKVM: ${{ runner.temp }}\fake-jetkvm.exe
       - name: Package
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist/jetkvm | Out-Null
-          Copy-Item target/release/casement-jetkvm.exe, plugin.json, icon.png, LICENSE, README.md dist/jetkvm/
+          Copy-Item target/release/casement-jetkvm.exe, plugin.json, icon.png, LICENSE, README.md, CHANGELOG.md dist/jetkvm/
       - uses: actions/upload-artifact@v4
         with:
           name: casement-jetkvm-windows-x64
