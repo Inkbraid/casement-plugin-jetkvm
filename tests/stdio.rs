@@ -185,8 +185,6 @@ fn bad_addresses_fail_with_text() {
         "vnc://host",
         "jetkvm://",
         "jetkvm://kvm.example.com?tls=maybe",
-        // Devices aren't supported by the skeleton yet.
-        "jetkvm://192.0.2.1",
         "jetkvm://test?fail=Simulated%20failure.",
     ] {
         let mut c = start();
