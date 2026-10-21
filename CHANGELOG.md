@@ -8,11 +8,13 @@
   Foundation, keyboard and absolute pointer over HID-RPC (JSON-RPC on older
   firmware), wheel over JSON-RPC, key keep-alives, keys released on
   disconnect, `closed` when another session takes the device over or it
-  restarts, a status picture while the device has no HDMI signal.
+  restarts or stops answering for 8 seconds, a status picture while the
+  device has no HDMI signal.
 - Media Foundation is loaded at run time: without it (Windows N without the
   Media Feature Pack) the plugin starts and says what is missing.
-- `tools/fake-jetkvm`, a stand-in device on JetKVM's own WebRTC stack, and
-  end-to-end tests against it on Linux and Windows in CI.
+- `tools/fake-jetkvm`, a stand-in device on JetKVM's own WebRTC stack (with
+  optional packet loss), and end-to-end tests against it on Linux and
+  Windows in CI.
 - Casement plugin protocol v1: length-prefixed JSON framing, `hello`,
   `connect`, `state`, `disconnect`, shared-memory surfaces with
   `frame`/`frame_ack` flow control, key, pointer and wheel input.

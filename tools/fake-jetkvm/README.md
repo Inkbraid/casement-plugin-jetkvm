@@ -18,6 +18,7 @@ go build -o ../../target/fake-jetkvm .
 | `-max-failures` | wrong passwords before logins are refused (HTTP 429) |
 | `-tls` | HTTPS with a self-signed certificate; its SHA-256 is in the first line |
 | `-signal=false` | no HDMI signal: no video, and the video state says `no_signal` |
+| `-loss 0.05` | lose this share of the video packets (lost ones can still be resent on request) |
 | `-fps` | frame rate of the file |
 
 Every line on stdout is a JSON object with an `event` member: `listening`

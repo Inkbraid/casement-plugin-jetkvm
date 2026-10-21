@@ -7,7 +7,7 @@
 // loop, and HID input is printed as JSON lines on stdout instead of reaching
 // a USB gadget.
 //
-//	fake-jetkvm -listen 127.0.0.1:8080 -video bars.h264 [-password secret] [-tls] [-signal=false]
+//	fake-jetkvm -listen 127.0.0.1:8080 -video bars.h264 [-password secret] [-tls] [-signal=false] [-loss 0.05]
 //
 // Every line on stdout is a JSON object with an "event" member; the first
 // is {"event":"listening","url":…,"fingerprint":…}.
@@ -33,6 +33,7 @@ import (
 	"io"
 	"log"
 	"math/big"
+	mathrand "math/rand"
 	"net"
 	"net/http"
 	"os"
@@ -44,6 +45,7 @@ import (
 	"github.com/coder/websocket/wsjson"
 	"github.com/google/uuid"
 	"github.com/pion/interceptor"
+	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
 	"github.com/pion/webrtc/v4/pkg/media/h264reader"
@@ -57,6 +59,7 @@ var (
 	fps      = flag.Int("fps", 30, "frames per second of the video file")
 	maxFails = flag.Int("max-failures", 5, "wrong passwords before logins are refused with 429")
 	signal   = flag.Bool("signal", true, "whether the HDMI input has a signal; without one no video is sent")
+	loss     = flag.Float64("loss", 0, "share of video packets lost on the way, from 0 to 1")
 )
 
 var (
@@ -249,6 +252,9 @@ func newSession(ws *websocket.Conn, sd string, frames [][]byte) (*session, error
 		return nil, err
 	}
 	ir := &interceptor.Registry{}
+	if *loss > 0 {
+		ir.Add(lossFactory{})
+	}
 	if err := webrtc.RegisterDefaultInterceptors(me, ir); err != nil {
 		return nil, err
 	}
@@ -342,6 +348,27 @@ func newSession(ws *websocket.Conn, sd string, frames [][]byte) (*session, error
 		}
 	}()
 	return s, nil
+}
+
+// lossFactory makes interceptors that drop a share of the video packets on
+// their way to the network. Registered first, it is the one nearest the
+// network: the interceptors after it (NACK among them) see every packet and
+// can resend lost ones, which may be lost again, as on a poor link.
+type lossFactory struct{}
+
+func (lossFactory) NewInterceptor(string) (interceptor.Interceptor, error) {
+	return &lossInterceptor{}, nil
+}
+
+type lossInterceptor struct{ interceptor.NoOp }
+
+func (*lossInterceptor) BindLocalStream(_ *interceptor.StreamInfo, w interceptor.RTPWriter) interceptor.RTPWriter {
+	return interceptor.RTPWriterFunc(func(h *rtp.Header, payload []byte, a interceptor.Attributes) (int, error) {
+		if mathrand.Float64() < *loss {
+			return h.MarshalSize() + len(payload), nil
+		}
+		return w.Write(h, payload, a)
+	})
 }
 
 // event sends a JSON-RPC notification, as JetKVM's writeJSONRPCEvent.

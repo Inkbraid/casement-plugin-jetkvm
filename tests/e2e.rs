@@ -155,6 +155,30 @@ fn pixel(s: &HostSurface, width: u32, x: u32, y: u32) -> [u8; 4] {
     s.pixels()[i..i + 4].try_into().unwrap()
 }
 
+/// The fake device's picture: SMPTE bars, 75 % white, yellow, cyan, green,
+/// magenta, red and blue across the top two thirds of 640x360.
+fn assert_bars(s: &HostSurface) {
+    let bars: [[u8; 3]; 7] = [
+        [191, 191, 191],
+        [0, 191, 191],
+        [191, 191, 0],
+        [0, 191, 0],
+        [191, 0, 191],
+        [0, 0, 191],
+        [191, 0, 0],
+    ];
+    for (i, want) in bars.iter().enumerate() {
+        let x = (i as u32 * 640 / 7) + 640 / 14;
+        let got = pixel(s, 640, x, 100);
+        for ch in 0..3 {
+            assert!(
+                (got[ch] as i32 - want[ch] as i32).abs() <= 24,
+                "bar {i} at x={x}: got {got:?}, want {want:?} (BGR)"
+            );
+        }
+    }
+}
+
 fn disconnect(mut c: Casement) {
     c.send(&FromCasement::Disconnect).unwrap();
     c.close_stdin();
@@ -181,29 +205,9 @@ fn video_and_input() {
     assert_eq!(state(&c), (State::Connected, String::new()));
     dev.expect("a login", |v| v["event"] == "login" && v["ok"] == true);
 
-    // The picture: SMPTE bars, 75 % white, yellow, cyan, green, magenta,
-    // red and blue across the top two thirds.
     assert_eq!(surface_request(&c), (640, 360));
     let s = first_frame(&mut c, (640, 360));
-    let bars: [[u8; 3]; 7] = [
-        [191, 191, 191],
-        [0, 191, 191],
-        [191, 191, 0],
-        [0, 191, 0],
-        [191, 0, 191],
-        [0, 0, 191],
-        [191, 0, 0],
-    ];
-    for (i, want) in bars.iter().enumerate() {
-        let x = (i as u32 * 640 / 7) + 640 / 14;
-        let got = pixel(&s, 640, x, 100);
-        for ch in 0..3 {
-            assert!(
-                (got[ch] as i32 - want[ch] as i32).abs() <= 24,
-                "bar {i} at x={x}: got {got:?}, want {want:?} (BGR)"
-            );
-        }
-    }
+    assert_bars(&s);
     dev.expect("the HID-RPC handshake", |v| is_hid(v, "handshake"));
 
     // The pointer, scaled to 0..32767, with a right click (HID button 2).
@@ -455,6 +459,42 @@ fn no_signal_shows_a_status_picture() {
         .count();
     assert!(text > 100, "no title drawn ({text} pixels)");
     disconnect(c);
+}
+
+#[test]
+fn lost_video_packets_are_resent() {
+    let Some(dev) = Device::start(&["-loss", "0.1"]) else {
+        return;
+    };
+    let mut c = connect(&dev.address(""), "");
+    assert_eq!(state(&c).0, State::Connected);
+    assert_eq!(surface_request(&c), (640, 360));
+    let s = first_frame(&mut c, (640, 360));
+    assert_bars(&s);
+    disconnect(c);
+}
+
+#[test]
+fn device_that_disappears_closes_the_session() {
+    let Some(mut dev) = Device::start(&[]) else {
+        return;
+    };
+    let mut c = connect(&dev.address(""), "");
+    assert_eq!(state(&c).0, State::Connected);
+    assert_eq!(surface_request(&c), (640, 360));
+    first_frame(&mut c, (640, 360));
+    // Pulled from the network, or switched off: nothing more arrives.
+    dev.child.kill().unwrap();
+    let gone = Instant::now();
+    let (s, text) = state(&c);
+    assert_eq!(s, State::Closed);
+    assert_eq!(text, "The connection to the JetKVM was lost.");
+    assert!(
+        gone.elapsed() < Duration::from_secs(12),
+        "{:?}",
+        gone.elapsed()
+    );
+    assert_eq!(c.wait(T).and_then(|s| s.code()), Some(0));
 }
 
 #[test]
