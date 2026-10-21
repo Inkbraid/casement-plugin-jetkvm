@@ -50,7 +50,10 @@ jetkvm://<host>[:<port>][?tls[&fingerprint=<sha256>]]
 - `tls`: reach the device over HTTPS, for devices with TLS turned on. The
   certificate is checked against Windows' trusted roots, or, for JetKVM's
   self-signed certificate, against `fingerprint`: the certificate's SHA-256,
-  as 64 hex digits (colons allowed).
+  as 64 hex digits (colons allowed). In self-signed mode a JetKVM makes a
+  certificate for each name or address it is reached by, so the fingerprint
+  belongs with the host in the address; when it is missing or doesn't
+  match, the plugin's message gives the one the device presented.
 
 Examples:
 
@@ -85,7 +88,9 @@ Things to know:
 
 - **One session at a time.** A JetKVM serves one session: connecting from
   Casement ends a session open in a browser (or another Casement tab), and
-  opening the web UI ends Casement's, which then shows as closed.
+  opening the web UI ends Casement's, which then shows as closed. Each
+  password login also signs earlier logins out, as a login from another
+  browser does, so the web UI asks for the password again.
 - **Network.** Besides HTTP(S) to the device, the video and input travel
   over UDP directly between this computer and the JetKVM (WebRTC, no
   relay), so a firewall must let UDP through on the local network. JetKVM
