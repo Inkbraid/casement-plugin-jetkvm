@@ -43,6 +43,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(1);
 /// How long the connection may be interrupted before the session ends.
 const DISCONNECTED_GRACE: Duration = Duration::from_secs(5);
+/// How long the device may be silent. It checks the connection at least
+/// every two seconds, and gives up on a peer itself after five.
+const SILENCE: Duration = Duration::from_secs(8);
 /// Input kept while the way to send it isn't known yet.
 const MAX_QUEUED_INPUT: usize = 256;
 /// Casement ends the process two seconds after `disconnect`.
@@ -249,6 +252,8 @@ struct Connection {
     connected: bool,
     connect_deadline: Instant,
     disconnected_since: Option<Instant>,
+    /// When the last packet came.
+    last_packet: Instant,
 }
 
 impl Connection {
@@ -295,6 +300,7 @@ impl Connection {
             connected: false,
             connect_deadline: now + CONNECT_TIMEOUT,
             disconnected_since: None,
+            last_packet: now,
         })
     }
 
@@ -307,6 +313,7 @@ impl Connection {
                 self.handshake_deadline,
                 (!self.connected).then_some(self.connect_deadline),
                 self.disconnected_since.map(|t| t + DISCONNECTED_GRACE),
+                self.connected.then_some(self.last_packet + SILENCE),
             ];
             for d in others.into_iter().flatten() {
                 deadline = deadline.min(d);
@@ -386,6 +393,7 @@ impl Connection {
     }
 
     fn receive(&mut self, data: &[u8], source: SocketAddr, destination: SocketAddr, at: Instant) {
+        self.last_packet = at;
         match Receive::new(Protocol::Udp, source, destination, data) {
             Ok(r) => {
                 if let Err(e) = self.rtc.handle_input(Input::Receive(at, r)) {
@@ -407,10 +415,11 @@ impl Connection {
         if !self.connected && now >= self.connect_deadline {
             self.end("The JetKVM didn't answer over WebRTC. Is UDP between this computer and the JetKVM blocked?");
         }
-        if let Some(t) = self.disconnected_since {
-            if now >= t + DISCONNECTED_GRACE {
-                self.end("The connection to the JetKVM was lost.");
-            }
+        let interrupted = self
+            .disconnected_since
+            .is_some_and(|t| now >= t + DISCONNECTED_GRACE);
+        if interrupted || (self.connected && now >= self.last_packet + SILENCE) {
+            self.end("The connection to the JetKVM was lost.");
         }
         if self.handshake_deadline.is_some_and(|t| now >= t) && self.hid.mode == Mode::Pending {
             log::info!("no HID-RPC; sending input as JSON-RPC");
