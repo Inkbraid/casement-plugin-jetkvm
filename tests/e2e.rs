@@ -462,6 +462,55 @@ fn no_signal_shows_a_status_picture() {
 }
 
 #[test]
+fn firmware_without_hid_rpc_gets_json_rpc() {
+    let Some(dev) = Device::start(&["-hidrpc=false"]) else {
+        return;
+    };
+    let mut c = connect(&dev.address(""), "");
+    assert_eq!(state(&c).0, State::Connected);
+    // Sent before the plugin knows the device has no HID-RPC: kept, then
+    // sent as JSON-RPC once the handshake goes unanswered.
+    send(
+        &mut c,
+        FromCasement::Key {
+            scancode: 0x1E,
+            down: true,
+        },
+    );
+    send(
+        &mut c,
+        FromCasement::Key {
+            scancode: 0x1E,
+            down: false,
+        },
+    );
+    let is_rpc = |v: &Value, method: &str| v["event"] == "rpc" && v["method"] == method;
+    let k = dev.expect("A down", |v| is_rpc(v, "keypressReport"));
+    assert_eq!(
+        (k["params"]["key"].as_i64(), k["params"]["press"].as_bool()),
+        (Some(4), Some(true))
+    );
+    let k = dev.expect("A up", |v| is_rpc(v, "keypressReport"));
+    assert_eq!(k["params"]["press"], false);
+
+    assert_eq!(surface_request(&c), (640, 360));
+    first_frame(&mut c, (640, 360));
+    send(
+        &mut c,
+        FromCasement::Pointer {
+            x: 639,
+            y: 0,
+            buttons: 1,
+        },
+    );
+    let p = dev.expect("a pointer report", |v| is_rpc(v, "absMouseReport"));
+    assert_eq!(p["params"]["x"], 32767);
+    assert_eq!(p["params"]["y"], 0);
+    assert_eq!(p["params"]["buttons"], 1);
+    disconnect(c);
+}
+
+#[test]
 fn lost_video_packets_are_resent() {
     let Some(dev) = Device::start(&["-loss", "0.1"]) else {
         return;

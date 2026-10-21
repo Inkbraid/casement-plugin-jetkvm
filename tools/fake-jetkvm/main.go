@@ -7,7 +7,7 @@
 // loop, and HID input is printed as JSON lines on stdout instead of reaching
 // a USB gadget.
 //
-//	fake-jetkvm -listen 127.0.0.1:8080 -video bars.h264 [-password secret] [-tls] [-signal=false] [-loss 0.05]
+//	fake-jetkvm -listen 127.0.0.1:8080 -video bars.h264 [-password secret] [-tls] [-signal=false] [-loss 0.05] [-hidrpc=false]
 //
 // Every line on stdout is a JSON object with an "event" member; the first
 // is {"event":"listening","url":…,"fingerprint":…}.
@@ -60,6 +60,7 @@ var (
 	maxFails = flag.Int("max-failures", 5, "wrong passwords before logins are refused with 429")
 	signal   = flag.Bool("signal", true, "whether the HDMI input has a signal; without one no video is sent")
 	loss     = flag.Float64("loss", 0, "share of video packets lost on the way, from 0 to 1")
+	hidRPC   = flag.Bool("hidrpc", true, "answer HID-RPC; firmware before it took input over JSON-RPC only")
 )
 
 var (
@@ -288,7 +289,9 @@ func newSession(ws *websocket.Conn, sd string, frames [][]byte) (*session, error
 			// JetKVM reports its video state as the channel opens.
 			d.OnOpen(func() { s.event("videoInputState", videoState()) })
 		case "hidrpc", "hidrpc-unreliable-ordered", "hidrpc-unreliable-nonordered":
-			d.OnMessage(func(m webrtc.DataChannelMessage) { onHID(d, m.Data) })
+			if *hidRPC {
+				d.OnMessage(func(m webrtc.DataChannelMessage) { onHID(d, m.Data) })
+			}
 		}
 	})
 
