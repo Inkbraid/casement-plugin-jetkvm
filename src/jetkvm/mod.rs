@@ -226,6 +226,35 @@ fn route_to(remote: SocketAddr) -> Option<IpAddr> {
     Some(s.local_addr().ok()?.ip())
 }
 
+/// A new peer connection and its offer: H.264 video from the device, and
+/// the `rpc` and `hidrpc` data channels.
+fn offer(
+    local: SocketAddr,
+    now: Instant,
+) -> Result<(Rtc, ChannelId, ChannelId, String, SdpPendingOffer), String> {
+    // JetKVM sends H.265 when "H265" appears anywhere in the offer, H.264
+    // otherwise. Only H.264 is offered, but the random ICE credentials
+    // could spell it out, so such an offer is made again.
+    for _ in 0..8 {
+        let mut rtc = Rtc::builder().clear_codecs().enable_h264(true).build(now);
+        let candidate =
+            Candidate::host(local, "udp").map_err(|e| format!("Couldn't use {local}: {e}"))?;
+        rtc.add_local_candidate(candidate);
+        let mut api = rtc.sdp_api();
+        api.add_media(MediaKind::Video, Direction::RecvOnly, None, None, None);
+        let rpc = api.add_channel("rpc".into());
+        let hidrpc = api.add_channel("hidrpc".into());
+        let (offer, pending) = api
+            .apply()
+            .ok_or("Couldn't make the WebRTC offer.".to_string())?;
+        let sdp = offer.to_sdp_string();
+        if !sdp.to_ascii_uppercase().contains("H265") {
+            return Ok((rtc, rpc, hidrpc, sdp, pending));
+        }
+    }
+    Err("Couldn't make a WebRTC offer for H.264 only.".into())
+}
+
 /// The session with the device, from the offer to the end.
 struct Connection {
     host: Arc<Host>,
@@ -262,22 +291,8 @@ impl Connection {
         let stop = Arc::new(AtomicBool::new(false));
         // The address we reach the device from is the one it can reach us on.
         let first = Socket::open(signaling.local.ip(), &events, &stop)?;
-        let mut rtc = Rtc::builder()
-            .clear_codecs()
-            // JetKVM sends H.265 only when offered it, and H.264 otherwise.
-            .enable_h264(true)
-            .build(now);
-        let candidate = Candidate::host(first.local, "udp")
-            .map_err(|e| format!("Couldn't use {}: {e}", first.local))?;
-        rtc.add_local_candidate(candidate);
-        let mut api = rtc.sdp_api();
-        api.add_media(MediaKind::Video, Direction::RecvOnly, None, None, None);
-        let rpc = api.add_channel("rpc".into());
-        let hidrpc = api.add_channel("hidrpc".into());
-        let (offer, pending) = api
-            .apply()
-            .ok_or("Couldn't make the WebRTC offer.".to_string())?;
-        let listener = signaling.offer(&offer.to_sdp_string(), events.clone())?;
+        let (rtc, rpc, hidrpc, offer, pending) = offer(first.local, now)?;
+        let listener = signaling.offer(&offer, events.clone())?;
         log::debug!("offer sent");
         Ok(Connection {
             video: video::start(host.clone()),
