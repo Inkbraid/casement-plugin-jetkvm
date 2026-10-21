@@ -2,11 +2,14 @@
 //! status picture while the device has no video to show.
 //!
 //! Decoding runs on its own thread so the connection never waits for it.
-//! Only what changed between pictures (in 64-pixel tiles) is marked as
-//! damage, which keeps `frame` messages small for a mostly still desktop.
+//! Each picture is compared with the last in 64-pixel tiles before it is
+//! converted: only tiles that changed are converted, copied and marked as
+//! damage, which keeps both the work and the `frame` messages small for a
+//! mostly still desktop.
 
 use super::font;
-use super::h264::{self, Decode, Picture};
+use super::h264::{self, Decode};
+use super::yuv::{Frame, Planes, Rect};
 use crate::host::Host;
 use crate::protocol::State;
 use std::sync::mpsc::{self, Receiver, SyncSender};
@@ -52,11 +55,14 @@ fn run(host: Arc<Host>, rx: Receiver<Video>) {
     let mut decoder: Option<Box<dyn Decode>> = None;
     let mut waiting_for_key = true;
     let mut frames = 0u64;
+    // The picture on show, to compare the next one with.
+    let mut shown: Option<Planes> = None;
     while let Ok(msg) = rx.recv() {
         let (data, contiguous) = match msg {
             Video::Stop => return,
             Video::Status(title, detail) => {
                 draw_status(&host, title, detail);
+                shown = None;
                 // The device restarts its stream with a key frame.
                 waiting_for_key = true;
                 continue;
@@ -83,12 +89,12 @@ fn run(host: Arc<Host>, rx: Receiver<Video>) {
             },
         };
         match dec.decode(&data) {
-            Ok(Some(p)) => {
+            Ok(Some(f)) => {
                 if frames == 0 {
-                    log::info!("first picture: {}x{}", p.width, p.height);
+                    log::info!("first picture: {}x{}", f.width, f.height);
                 }
                 frames += 1;
-                show(&host, &p);
+                show(&host, &f, &mut shown);
             }
             Ok(None) => {}
             Err(e) => {
@@ -99,20 +105,25 @@ fn run(host: Arc<Host>, rx: Receiver<Video>) {
     }
 }
 
-/// Copies a decoded picture into the display, marking the tiles that changed.
-fn show(host: &Host, p: &Picture) {
+/// Puts a decoded picture in the display: all of it after a change of size
+/// (or a status picture), otherwise the tiles that differ from `shown`.
+fn show(host: &Host, f: &Frame, shown: &mut Option<Planes>) {
     let mut d = host.display();
-    if d.size() != (p.width, p.height) {
-        d.set_size(p.width, p.height);
-        let (buf, _) = d.buffer_mut();
-        buf.copy_from_slice(p.bgrx);
-        d.damage_all();
-        d.flush();
-        return;
-    }
+    let size = (f.width as u32, f.height as u32);
+    let comparable = d.size() == size && shown.as_ref().is_some_and(|p| p.matches(f));
     let dirty = {
+        if !comparable {
+            d.set_size(size.0, size.1);
+        }
         let (buf, stride) = d.buffer_mut();
-        copy_changes(buf, p.bgrx, stride, p.width as usize, p.height as usize)
+        match shown {
+            Some(p) if comparable => changed_tiles(f, p, |r| f.convert(r, buf, stride)),
+            _ => {
+                f.convert([0, 0, f.width, f.height], buf, stride);
+                *shown = Some(Planes::new(f));
+                vec![[0, 0, size.0, size.1]]
+            }
+        }
     };
     for [x, y, w, h] in dirty {
         d.damage(x, y, w, h);
@@ -120,21 +131,22 @@ fn show(host: &Host, p: &Picture) {
     d.flush();
 }
 
-/// Copies the tiles of `new` that differ from `old` (both `width * 4` bytes
-/// per row) and returns them as rectangles, adjacent tiles in a row joined.
-fn copy_changes(old: &mut [u8], new: &[u8], stride: usize, w: usize, h: usize) -> Vec<[u32; 4]> {
+/// Finds the tiles of `f` that differ from `shown`, which takes them in,
+/// calls `changed` with each, and returns them as rectangles, adjacent
+/// tiles in a row joined.
+fn changed_tiles(f: &Frame, shown: &mut Planes, mut changed: impl FnMut(Rect)) -> Vec<[u32; 4]> {
+    let (w, h) = (f.width, f.height);
     let mut dirty = Vec::new();
+    let mut marks = vec![false; w.div_ceil(TILE)];
     for ty in (0..h).step_by(TILE) {
         let th = TILE.min(h - ty);
+        marks.fill(false);
+        shown.compare_band(f, ty, th, TILE, &mut marks);
         let mut run: Option<(usize, usize)> = None;
-        for tx in (0..w).step_by(TILE) {
-            let tw = TILE.min(w - tx);
-            let rows = ty..ty + th;
-            let span = |y: usize| y * stride + tx * 4..y * stride + (tx + tw) * 4;
-            if rows.clone().any(|y| old[span(y)] != new[span(y)]) {
-                for y in rows {
-                    old[span(y)].copy_from_slice(&new[span(y)]);
-                }
+        for (i, &mark) in marks.iter().enumerate() {
+            let (tx, tw) = (i * TILE, TILE.min(w - i * TILE));
+            if mark {
+                changed([tx, ty, tw, th]);
                 run = Some((run.map_or(tx, |r| r.0), tx + tw));
             } else if let Some((s, e)) = run.take() {
                 dirty.push([s as u32, ty as u32, (e - s) as u32, th as u32]);
@@ -246,19 +258,37 @@ mod tests {
 
     #[test]
     fn finds_changed_tiles() {
+        use crate::jetkvm::yuv::Chroma;
         let (w, h) = (200, 100);
-        let stride = w * 4;
-        let mut old = vec![0u8; stride * h];
-        let mut new = old.clone();
+        let mut y = vec![16u8; w * h];
+        let c = vec![128u8; w.div_ceil(2) * h.div_ceil(2)];
+        let frame = |y| Frame {
+            width: w,
+            height: h,
+            y,
+            y_stride: w,
+            chroma: Chroma::Planar {
+                u: &c,
+                v: &c,
+                u_stride: w / 2,
+                v_stride: w / 2,
+            },
+        };
+        let before = y.clone();
+        let mut shown = Planes::new(&frame(&before));
         // Two changed pixels in adjacent tiles of the first tile row, one in
         // the second.
-        for (x, y) in [(10, 5), (70, 60), (150, 90)] {
-            new[y * stride + x * 4] = 1;
+        for (x, row) in [(10, 5), (70, 60), (150, 90)] {
+            y[row * w + x] = 200;
         }
-        let dirty = copy_changes(&mut old, &new, stride, w, h);
+        let mut converted = Vec::new();
+        let dirty = changed_tiles(&frame(&y), &mut shown, |r| converted.push(r));
         assert_eq!(dirty, vec![[0, 0, 128, 64], [128, 64, 64, 36]]);
-        assert_eq!(old, new);
-        assert!(copy_changes(&mut old, &new, stride, w, h).is_empty());
+        assert_eq!(
+            converted,
+            vec![[0, 0, 64, 64], [64, 0, 64, 64], [128, 64, 64, 36]]
+        );
+        assert!(changed_tiles(&frame(&y), &mut shown, |_| panic!("no change")).is_empty());
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! H.264 decoding to BGRX.
+//! H.264 decoding.
 //!
 //! The shipped Windows build uses Windows' own decoder (Media Foundation),
 //! so no H.264 implementation is compiled into the plugin. Other platforms
@@ -9,17 +9,12 @@ mod mf;
 #[cfg(not(windows))]
 mod openh264;
 
-/// A decoded picture: BGRX, `width * 4` bytes per row.
-pub struct Picture<'a> {
-    pub width: u32,
-    pub height: u32,
-    pub bgrx: &'a [u8],
-}
+use super::yuv::Frame;
 
 pub trait Decode {
     /// Decodes one access unit (Annex B). `Ok(None)` while the decoder
     /// needs more input.
-    fn decode(&mut self, annexb: &[u8]) -> Result<Option<Picture<'_>>, String>;
+    fn decode(&mut self, annexb: &[u8]) -> Result<Option<Frame<'_>>, String>;
 }
 
 /// A decoder for this platform. Must be created and used on one thread.
@@ -127,8 +122,10 @@ mod tests {
         let mut dec = decoder().expect("a decoder");
         let mut last = None;
         for unit in access_units(CLIP) {
-            if let Some(p) = dec.decode(&unit).expect("decodes") {
-                last = Some((p.width, p.height, p.bgrx.to_vec()));
+            if let Some(f) = dec.decode(&unit).expect("decodes") {
+                let mut px = vec![0; f.width * f.height * 4];
+                f.convert([0, 0, f.width, f.height], &mut px, f.width * 4);
+                last = Some((f.width, f.height, px));
             }
         }
         let (w, h, px) = last.expect("a picture");
@@ -144,7 +141,7 @@ mod tests {
         ];
         for (i, want) in expected.iter().enumerate() {
             let x = (i * 160 / 7) + 160 / 14;
-            let o = (20 * w as usize + x) * 4;
+            let o = (20 * w + x) * 4;
             let got = &px[o..o + 3];
             for c in 0..3 {
                 assert!(

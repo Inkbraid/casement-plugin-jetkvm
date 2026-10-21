@@ -78,7 +78,9 @@ The plugin connects the way JetKVM's own web UI does:
    H.264 video from the device, and two data channels, `rpc` (JSON-RPC) and
    `hidrpc` (JetKVM's binary keyboard and mouse messages).
 3. Video is decoded by Windows' own H.264 decoder (Media Foundation) and
-   handed to Casement; only the parts that changed are copied.
+   handed to Casement. Each picture is compared with the last before it is
+   converted, so a still screen costs little more than decoding, and only
+   the parts that changed are copied.
 4. Keys go to the device as USB HID key presses, the pointer as absolute
    positions, the wheel as wheel reports. A held key is kept alive the way
    the web UI does it, so the device lets go of it if the connection drops.

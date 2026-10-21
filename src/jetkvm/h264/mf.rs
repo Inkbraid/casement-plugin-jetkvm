@@ -6,8 +6,8 @@
 //! rather than linked: without it the plugin still starts and says what is
 //! missing.
 
-use super::{Decode, Picture};
-use crate::jetkvm::yuv;
+use super::Decode;
+use crate::jetkvm::yuv::{Chroma, Frame};
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
 use std::sync::OnceLock;
@@ -120,7 +120,9 @@ pub struct MediaFoundation {
     /// Our output sample, when the decoder doesn't allocate its own.
     out: Option<IMFSample>,
     time: i64,
-    buf: Vec<u8>,
+    /// The last picture: luma, and the U, V pairs.
+    y: Vec<u8>,
+    uv: Vec<u8>,
     _started: Started,
 }
 
@@ -153,7 +155,8 @@ impl MediaFoundation {
             format: Format::default(),
             out: None,
             time: 0,
-            buf: Vec::new(),
+            y: Vec::new(),
+            uv: Vec::new(),
             _started: started,
         };
         dec.configure()?;
@@ -321,7 +324,7 @@ impl MediaFoundation {
             match result {
                 Ok(()) => {
                     if let Some(s) = sample {
-                        self.convert(&s)?;
+                        self.take(&s)?;
                         got = true;
                     }
                 }
@@ -333,8 +336,9 @@ impl MediaFoundation {
         Ok(got)
     }
 
-    /// The NV12 picture in `sample` to BGRX in `self.buf`.
-    fn convert(&mut self, sample: &IMFSample) -> Result<(), String> {
+    /// Copies the visible part of the NV12 picture in `sample` into `self.y`
+    /// and `self.uv`, without padding.
+    fn take(&mut self, sample: &IMFSample) -> Result<(), String> {
         let f = &self.format;
         let stride = f.stride as usize;
         let frame_h = f.frame_height as usize;
@@ -360,10 +364,19 @@ impl MediaFoundation {
             let data = std::slice::from_raw_parts(ptr, need);
             let (w, h) = (f.width as usize, f.height as usize);
             let (x, y) = (f.x as usize, f.y as usize);
-            let luma = &data[y * stride + x..stride * frame_h];
-            let chroma = &data[stride * frame_h + (y / 2) * stride + (x / 2) * 2..];
-            self.buf.resize(w * h * 4, 0);
-            yuv::nv12_to_bgrx(luma, chroma, stride, stride, w, h, &mut self.buf, w * 4);
+            self.y.clear();
+            for row in y..y + h {
+                self.y
+                    .extend_from_slice(&data[row * stride + x..row * stride + x + w]);
+            }
+            // Chroma: half the rows, and U, V pairs for every two columns.
+            let chroma = stride * frame_h;
+            let cw = w.div_ceil(2) * 2;
+            self.uv.clear();
+            for row in y / 2..y / 2 + h.div_ceil(2) {
+                let o = chroma + row * stride + x / 2 * 2;
+                self.uv.extend_from_slice(&data[o..o + cw]);
+            }
             let _ = buffer.Unlock();
         }
         Ok(())
@@ -389,7 +402,7 @@ fn aperture(t: &IMFMediaType, key: &GUID) -> Option<(u32, u32, u32, u32)> {
 }
 
 impl Decode for MediaFoundation {
-    fn decode(&mut self, annexb: &[u8]) -> Result<Option<Picture<'_>>, String> {
+    fn decode(&mut self, annexb: &[u8]) -> Result<Option<Frame<'_>>, String> {
         let sample = self.input_sample(annexb)?;
         let mut got = false;
         loop {
@@ -401,10 +414,16 @@ impl Decode for MediaFoundation {
             }
         }
         got |= self.drain()?;
-        Ok(got.then(|| Picture {
-            width: self.format.width,
-            height: self.format.height,
-            bgrx: &self.buf,
+        let width = self.format.width as usize;
+        Ok(got.then(|| Frame {
+            width,
+            height: self.format.height as usize,
+            y: &self.y,
+            y_stride: width,
+            chroma: Chroma::Interleaved {
+                uv: &self.uv,
+                stride: width.div_ceil(2) * 2,
+            },
         }))
     }
 }
