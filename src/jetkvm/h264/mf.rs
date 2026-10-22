@@ -123,8 +123,12 @@ pub struct MediaFoundation {
     mf: &'static Mfplat,
     mft: IMFTransform,
     format: Format,
-    /// Our output sample, when the decoder doesn't allocate its own.
-    out: Option<IMFSample>,
+    /// Pictures and format changes so far, for error messages.
+    pictures: u32,
+    format_changes: u32,
+    /// Our output sample and its buffer, when the decoder doesn't allocate
+    /// its own.
+    out: Option<(IMFSample, IMFMediaBuffer)>,
     time: i64,
     /// The last picture: luma, and the U, V pairs.
     y: Vec<u8>,
@@ -159,6 +163,8 @@ impl MediaFoundation {
             mf,
             mft,
             format: Format::default(),
+            pictures: 0,
+            format_changes: 0,
             out: None,
             time: 0,
             y: Vec::new(),
@@ -267,7 +273,7 @@ impl MediaFoundation {
                 sample
                     .AddBuffer(&buffer)
                     .map_err(|e| err("IMFSample::AddBuffer", e))?;
-                self.out = Some(sample);
+                self.out = Some((sample, buffer));
             }
             log::debug!(
                 "H.264 decoder output: {frame_width}x{frame_height} frame, picture {}x{} at {},{}, stride {}",
@@ -315,14 +321,21 @@ impl MediaFoundation {
         // The decoder says when it needs more input; the bound only guards
         // against one that never does.
         for _ in 0..64 {
+            let ours = match &self.out {
+                Some((sample, buffer)) if !self.format.provides_samples => {
+                    // An empty buffer for every picture: with the last
+                    // picture's length still set, the decoder found no room
+                    // for the next one ("CopyDecodedFrame failed").
+                    unsafe { buffer.SetCurrentLength(0) }
+                        .map_err(|e| err("IMFMediaBuffer::SetCurrentLength", e))?;
+                    Some(sample.clone())
+                }
+                _ => None,
+            };
             let (result, sample) = unsafe {
                 let mut out = [MFT_OUTPUT_DATA_BUFFER {
                     dwStreamID: 0,
-                    pSample: ManuallyDrop::new(if self.format.provides_samples {
-                        None
-                    } else {
-                        self.out.clone()
-                    }),
+                    pSample: ManuallyDrop::new(ours),
                     dwStatus: 0,
                     pEvents: ManuallyDrop::new(None),
                 }];
@@ -339,7 +352,10 @@ impl MediaFoundation {
                     }
                 }
                 Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(got),
-                Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => self.set_output_type()?,
+                Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
+                    self.format_changes += 1;
+                    self.set_output_type()?
+                }
                 Err(e) => {
                     return Err(format!(
                         "{} ({})",
@@ -357,8 +373,8 @@ impl MediaFoundation {
     fn describe_output(&self) -> String {
         let f = &self.format;
         let mut text = format!(
-            "output: {} rows of {} bytes, picture {}x{} at {},{}",
-            f.frame_height, f.stride, f.width, f.height, f.x, f.y
+            "after {} pictures and {} format changes; output: {} rows of {} bytes, picture {}x{} at {},{}",
+            self.pictures, self.format_changes, f.frame_height, f.stride, f.width, f.height, f.x, f.y
         );
         if !f.provides_samples {
             text += &format!(
@@ -418,6 +434,7 @@ impl MediaFoundation {
             }
             let _ = buffer.Unlock();
         }
+        self.pictures += 1;
         Ok(())
     }
 }
