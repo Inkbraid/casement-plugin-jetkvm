@@ -29,7 +29,7 @@ struct Mfplat {
     shutdown: unsafe extern "system" fn() -> HRESULT,
     create_media_type: unsafe extern "system" fn(*mut *mut c_void) -> HRESULT,
     create_sample: unsafe extern "system" fn(*mut *mut c_void) -> HRESULT,
-    create_memory_buffer: unsafe extern "system" fn(u32, *mut *mut c_void) -> HRESULT,
+    create_aligned_memory_buffer: unsafe extern "system" fn(u32, u32, *mut *mut c_void) -> HRESULT,
 }
 
 /// A function of `module` as the pointer type `T`.
@@ -52,7 +52,7 @@ impl Mfplat {
                     shutdown: function(m, s!("MFShutdown"))?,
                     create_media_type: function(m, s!("MFCreateMediaType"))?,
                     create_sample: function(m, s!("MFCreateSample"))?,
-                    create_memory_buffer: function(m, s!("MFCreateMemoryBuffer"))?,
+                    create_aligned_memory_buffer: function(m, s!("MFCreateAlignedMemoryBuffer"))?,
                 })
             })
             .as_ref()
@@ -75,10 +75,13 @@ impl Mfplat {
         }
     }
 
-    fn memory_buffer(&self, size: u32) -> windows::core::Result<IMFMediaBuffer> {
+    /// A buffer of `size` bytes whose start is a multiple of `alignment`, a
+    /// power of two.
+    fn memory_buffer(&self, size: u32, alignment: u32) -> windows::core::Result<IMFMediaBuffer> {
         let mut p = std::ptr::null_mut();
         unsafe {
-            (self.create_memory_buffer)(size, &mut p).ok()?;
+            // The function takes the alignment minus one (MF_16_BYTE_ALIGNMENT is 15).
+            (self.create_aligned_memory_buffer)(size, alignment - 1, &mut p).ok()?;
             Ok(IMFMediaBuffer::from_raw(p))
         }
     }
@@ -101,6 +104,9 @@ struct Format {
     width: u32,
     height: u32,
     provides_samples: bool,
+    /// Our output buffer's size and alignment, when we provide the samples.
+    buffer_size: u32,
+    alignment: u32,
 }
 
 /// Media Foundation, started. Shuts it down when dropped, which is after
@@ -249,11 +255,15 @@ impl MediaFoundation {
             self.out = None;
             if !f.provides_samples {
                 let size = info.cbSize.max(f.stride * frame_height * 3 / 2);
+                // The decoder copies its pictures with the alignment it asks
+                // for in cbAlignment (in bytes; 0 when it has no need).
+                let alignment = info.cbAlignment.max(16).next_power_of_two();
+                (f.buffer_size, f.alignment) = (size, alignment);
                 let sample = self.mf.sample().map_err(|e| err("MFCreateSample", e))?;
                 let buffer = self
                     .mf
-                    .memory_buffer(size)
-                    .map_err(|e| err("MFCreateMemoryBuffer", e))?;
+                    .memory_buffer(size, alignment)
+                    .map_err(|e| err("MFCreateAlignedMemoryBuffer", e))?;
                 sample
                     .AddBuffer(&buffer)
                     .map_err(|e| err("IMFSample::AddBuffer", e))?;
@@ -276,8 +286,8 @@ impl MediaFoundation {
         unsafe {
             let buffer = self
                 .mf
-                .memory_buffer(data.len() as u32)
-                .map_err(|e| err("MFCreateMemoryBuffer", e))?;
+                .memory_buffer(data.len() as u32, 1)
+                .map_err(|e| err("MFCreateAlignedMemoryBuffer", e))?;
             let mut ptr = std::ptr::null_mut();
             buffer
                 .Lock(&mut ptr, None, None)
@@ -330,10 +340,39 @@ impl MediaFoundation {
                 }
                 Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(got),
                 Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => self.set_output_type()?,
-                Err(e) => return Err(err("The H.264 decoder failed", e)),
+                Err(e) => {
+                    return Err(format!(
+                        "{} ({})",
+                        err("The H.264 decoder failed", e),
+                        self.describe_output()
+                    ))
+                }
             }
         }
         Ok(got)
+    }
+
+    /// The output format and buffer, and what the decoder asks for, for
+    /// error messages.
+    fn describe_output(&self) -> String {
+        let f = &self.format;
+        let mut text = format!(
+            "output: {} rows of {} bytes, picture {}x{} at {},{}",
+            f.frame_height, f.stride, f.width, f.height, f.x, f.y
+        );
+        if !f.provides_samples {
+            text += &format!(
+                "; our buffer {} bytes aligned to {}",
+                f.buffer_size, f.alignment
+            );
+        }
+        if let Ok(info) = unsafe { self.mft.GetOutputStreamInfo(0) } {
+            text += &format!(
+                "; the decoder asks for {} bytes aligned to {}, flags {:#x}",
+                info.cbSize, info.cbAlignment, info.dwFlags
+            );
+        }
+        text
     }
 
     /// Copies the visible part of the NV12 picture in `sample` into `self.y`
