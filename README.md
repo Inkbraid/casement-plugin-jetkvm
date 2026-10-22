@@ -17,7 +17,7 @@ connects, shows the picture and passes keyboard and mouse input.
 |---|---|
 | Plugin protocol v1 (framing, start, states, surfaces, frame flow control, input) | done |
 | `jetkvm://test` test pattern for testing Casement's side | done |
-| JetKVM devices: local password login, WebRTC H.264 video, keyboard and mouse | in progress |
+| JetKVM devices: local password login, TLS with certificate pinning, WebRTC H.264 video, keyboard and mouse | done; tested against a stand-in device (below), not yet against a real JetKVM |
 | Audio, paste as typing, virtual media, JetKVM Cloud | later, if at all |
 
 See [CHANGELOG.md](CHANGELOG.md).
@@ -50,7 +50,10 @@ jetkvm://<host>[:<port>][?tls[&fingerprint=<sha256>]]
 - `tls`: reach the device over HTTPS, for devices with TLS turned on. The
   certificate is checked against Windows' trusted roots, or, for JetKVM's
   self-signed certificate, against `fingerprint`: the certificate's SHA-256,
-  as 64 hex digits (colons allowed).
+  as 64 hex digits (colons allowed). In self-signed mode a JetKVM makes a
+  certificate for each name or address it is reached by, so the fingerprint
+  belongs with the host in the address; when it is missing or doesn't
+  match, the plugin's message gives the one the device presented.
 
 Examples:
 
@@ -62,6 +65,43 @@ jetkvm://kvm.lan?tls&fingerprint=3A:5F:…:C2
 The password comes from Casement (saved, or typed when the plugin reports
 that one is needed). The plugin doesn't store it. Devices without a password
 (JetKVM's "no password" mode) connect without one.
+
+## How it works with a device
+
+The plugin connects the way JetKVM's own web UI does:
+
+1. It logs in with the password (`POST /auth/login-local`) for a session
+   cookie. A wrong password is reported as `auth_failed`, so Casement asks
+   for another; after too many the device refuses logins for a while, and
+   the plugin says so.
+2. It opens the device's signaling WebSocket and offers a WebRTC connection:
+   H.264 video from the device, and two data channels, `rpc` (JSON-RPC) and
+   `hidrpc` (JetKVM's binary keyboard and mouse messages).
+3. Video is decoded by Windows' own H.264 decoder (Media Foundation) and
+   handed to Casement. Each picture is compared with the last before it is
+   converted, so a still screen costs little more than decoding, and only
+   the parts that changed are copied.
+4. Keys go to the device as USB HID key presses, the pointer as absolute
+   positions, the wheel as wheel reports. A held key is kept alive the way
+   the web UI does it, so the device lets go of it if the connection drops.
+   Disconnecting releases everything still held.
+
+Things to know:
+
+- **One session at a time.** A JetKVM serves one session: connecting from
+  Casement ends a session open in a browser (or another Casement tab), and
+  opening the web UI ends Casement's, which then shows as closed. Each
+  password login also signs earlier logins out, as a login from another
+  browser does, so the web UI asks for the password again.
+- **Network.** Besides HTTP(S) to the device, the video and input travel
+  over UDP directly between this computer and the JetKVM (WebRTC, no
+  relay), so a firewall must let UDP through on the local network. JetKVM
+  Cloud connections aren't supported.
+- **No signal.** When the device has no HDMI signal (computer off or
+  asleep), the tab shows a message saying so until the picture returns.
+- **Windows N.** Media Foundation is part of Windows except in N editions,
+  which need the Media Feature Pack (Settings → Apps → Optional features);
+  without it the plugin says so instead of showing a picture.
 
 ### Test pattern
 
@@ -92,6 +132,22 @@ The Windows build links the C runtime statically (`.cargo/config.toml`) and
 is built for the GUI subsystem, so starting it never opens a console window;
 its redirected standard handles work as usual.
 
+### Testing without a JetKVM
+
+`tools/fake-jetkvm` is a stand-in device for the end-to-end tests: JetKVM's
+login, signaling and WebRTC session set-up on the same libraries the device
+runs (pion WebRTC, coder/websocket), with a looping H.264 file as the
+picture. It prints the input it receives as JSON lines.
+
+```
+cd tools/fake-jetkvm && go build -o ../../target/fake-jetkvm . && cd ../..
+FAKE_JETKVM=target/fake-jetkvm cargo test --test e2e
+```
+
+Without `FAKE_JETKVM` those tests are skipped (CI sets `CASEMENT_E2E=1`,
+which makes a missing device an error). `-password`, `-tls` and
+`-signal=false` select the device's modes.
+
 ### Trying it without Casement
 
 `examples/casement-sim.rs` plays Casement's side: it answers surface requests,
@@ -121,9 +177,21 @@ version 2 only** ([LICENSE](LICENSE)), the licence of JetKVM's own software
 reused here.
 
 Every dependency must be usable under GPL-2.0-only; `deny.toml` lists the
-licences allowed and CI checks them (`cargo deny check licenses`). Crates
-offered under a choice of licences (for example "MIT or Apache-2.0") are
-used under the compatible one.
+licences allowed and CI checks them (`cargo deny check licenses`) for the
+Windows build, which is the one distributed. Crates offered under a choice
+of licences (for example "MIT or Apache-2.0") are used under the compatible
+one. In particular:
+
+- WebRTC is [str0m](https://github.com/algesten/str0m) (MIT), its DTLS
+  from dimpl, with the cryptography itself done by Windows (CNG).
+- H.264 is decoded by Windows (Media Foundation), so the plugin contains no
+  H.264 decoder of its own.
+- The status pictures use the public-domain
+  [font8x8](https://github.com/dhepper/font8x8) by Daniel Hepper.
+
+The Linux builds exist only for tests and use OpenSSL and OpenH264 instead;
+they are not distributed. `tools/fake-jetkvm` is part of this program's
+source under the same licence.
 
 Casement itself is a separate program that talks to this plugin only through
 the documented protocol in [docs/plugin-protocol.md](docs/plugin-protocol.md);

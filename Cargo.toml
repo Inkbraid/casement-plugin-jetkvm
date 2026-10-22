@@ -22,12 +22,35 @@ base64 = "0.22"
 log = "0.4"
 env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
 percent-encoding = "2"
+sha2 = "0.10"
+# WebRTC, sans I/O. The crypto backend is chosen per platform below; the
+# shipped Windows build uses Windows' own (CNG).
+str0m = { version = "0.24", default-features = false }
+# Signaling WebSocket, over our own TCP/TLS stream.
+tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
+native-tls = "0.2"
+# A larger UDP receive buffer than the platform default.
+socket2 = "0.6"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 memmap2 = "0.9"
 
+[target.'cfg(not(windows))'.dependencies]
+# Test builds only (the plugin ships for Windows): OpenSSL for DTLS and
+# OpenH264 for decoding.
+str0m = { version = "0.24", default-features = false, features = ["openssl"] }
+openh264 = "0.9"
+
 [target.'cfg(windows)'.dependencies]
+str0m = { version = "0.24", default-features = false, features = ["wincrypto"] }
+# Media Foundation, for Windows' own H.264 decoder.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+] }
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Security",

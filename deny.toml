@@ -31,3 +31,9 @@ multiple-versions = "allow"
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+
+# The plugin ships for Windows only. The Linux builds exist for tests (with
+# OpenSSL and OpenH264, which the Windows build doesn't use) and aren't
+# distributed.
+[graph]
+targets = ["x86_64-pc-windows-msvc"]

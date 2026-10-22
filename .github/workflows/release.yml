@@ -1,8 +1,9 @@
 name: Release
 
-# Pushing a tag like v0.1.0 builds the plugin and publishes a release with
-# the zip. GitHub adds the tag's source archives to every release, which
-# keeps each binary next to its corresponding source as the GPL requires.
+# Pushing a tag like v0.1.0 builds and tests the plugin and publishes a
+# release with the zip. GitHub adds the tag's source archives to every
+# release, which keeps each binary next to its corresponding source as the
+# GPL requires.
 
 on:
   push:
@@ -10,6 +11,10 @@ on:
 
 permissions:
   contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CASEMENT_E2E: "1"
 
 jobs:
   release:
@@ -22,8 +27,23 @@ jobs:
         run: |
           $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
           if ("v$version" -ne "${{ github.ref_name }}") { throw "tag ${{ github.ref_name }} != crate version $version" }
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tools/fake-jetkvm/go.mod
+          cache-dependency-path: tools/fake-jetkvm/go.sum
+      - name: Build the fake JetKVM
+        working-directory: tools/fake-jetkvm
+        run: go build -o "${{ runner.temp }}/fake-jetkvm.exe" .
+      - name: Media Foundation
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "$env:SystemRoot\System32\mfplat.dll")) {
+            Install-WindowsFeature Server-Media-Foundation
+          }
       - run: cargo build --release
       - run: cargo test --release
+        env:
+          FAKE_JETKVM: ${{ runner.temp }}\fake-jetkvm.exe
       - name: Package
         shell: pwsh
         run: |

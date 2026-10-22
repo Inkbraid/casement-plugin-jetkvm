@@ -4,6 +4,7 @@
 pub mod address;
 pub mod display;
 pub mod host;
+pub mod jetkvm;
 pub mod protocol;
 pub mod session;
 pub mod sim;
@@ -64,13 +65,7 @@ pub fn run(host: Arc<Host>, mut input: impl Read) -> i32 {
     let mut session = match address::parse(&address) {
         Err(text) => host.finish(State::Failed, &text),
         Ok(Address::Test(opts)) => test_pattern::start(host.clone(), opts, &password),
-        Ok(Address::Device(device)) => {
-            log::info!("device {}", device.base_url());
-            host.finish(
-                State::Failed,
-                "This build of the JetKVM plugin can't connect to JetKVM devices yet.",
-            )
-        }
+        Ok(Address::Device(device)) => jetkvm::start(host.clone(), device, &password),
     };
     drop(password);
 
