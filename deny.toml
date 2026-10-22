@@ -1,0 +1,33 @@
+# Licences of dependencies must be compatible with GPL-2.0-only, the licence
+# of this program. Dual-licensed crates (e.g. "MIT OR Apache-2.0") are used
+# under the compatible choice. Apache-2.0 alone is not compatible with
+# GPL-2.0-only and is therefore not allowed.
+[licenses]
+allow = [
+    "MIT",
+    "MIT-0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "CC0-1.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "MPL-2.0",
+    "GPL-2.0",
+    "GPL-2.0-only",
+    "GPL-2.0-or-later",
+    "LGPL-2.1",
+    "LGPL-2.1-or-later",
+]
+confidence-threshold = 0.9
+# The list is a policy, not an inventory.
+unused-allowed-license = "allow"
+
+[bans]
+multiple-versions = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
