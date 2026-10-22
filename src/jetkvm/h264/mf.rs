@@ -122,7 +122,13 @@ impl Drop for Started {
 pub struct MediaFoundation {
     mf: &'static Mfplat,
     mft: IMFTransform,
+    /// The picture size the decoder was set up for, from the stream's
+    /// sequence parameter set; nothing until the first one.
+    size: Option<(u32, u32)>,
     format: Format,
+    /// Pictures and format changes so far, for error messages.
+    pictures: u32,
+    format_changes: u32,
     /// Our output sample, when the decoder doesn't allocate its own.
     out: Option<IMFSample>,
     time: i64,
@@ -155,21 +161,27 @@ impl MediaFoundation {
                 )?;
             (mft, started)
         };
-        let mut dec = MediaFoundation {
+        Ok(MediaFoundation {
             mf,
             mft,
+            size: None,
             format: Format::default(),
+            pictures: 0,
+            format_changes: 0,
             out: None,
             time: 0,
             y: Vec::new(),
             uv: Vec::new(),
             _started: started,
-        };
-        dec.configure()?;
-        Ok(dec)
+        })
     }
 
-    fn configure(&mut self) -> Result<(), String> {
+    /// Sets the decoder up for pictures of `width` x `height`. Given the size
+    /// with the input type, the decoder offers outputs of that size at once:
+    /// set up without it, it assumed 1920x1080 and its first picture after
+    /// the format change failed to copy into our buffer on Windows Server
+    /// ("CopyDecodedFrame failed").
+    fn configure(&mut self, (width, height): (u32, u32)) -> Result<(), String> {
         unsafe {
             // Output each picture as soon as it is decoded.
             if let Ok(a) = self.mft.GetAttributes() {
@@ -184,6 +196,12 @@ impl MediaFoundation {
                 .and_then(|_| input.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264))
                 .and_then(|_| {
                     input.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
+                })
+                .and_then(|_| {
+                    input.SetUINT64(
+                        &MF_MT_FRAME_SIZE,
+                        (u64::from(width) << 32) | u64::from(height),
+                    )
                 })
                 .map_err(|e| err("Setting up the H.264 input", e))?;
             self.mft
@@ -339,7 +357,10 @@ impl MediaFoundation {
                     }
                 }
                 Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(got),
-                Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => self.set_output_type()?,
+                Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
+                    self.format_changes += 1;
+                    self.set_output_type()?
+                }
                 Err(e) => {
                     return Err(format!(
                         "{} ({})",
@@ -357,8 +378,8 @@ impl MediaFoundation {
     fn describe_output(&self) -> String {
         let f = &self.format;
         let mut text = format!(
-            "output: {} rows of {} bytes, picture {}x{} at {},{}",
-            f.frame_height, f.stride, f.width, f.height, f.x, f.y
+            "after {} pictures and {} format changes; output: {} rows of {} bytes, picture {}x{} at {},{}",
+            self.pictures, self.format_changes, f.frame_height, f.stride, f.width, f.height, f.x, f.y
         );
         if !f.provides_samples {
             text += &format!(
@@ -418,6 +439,7 @@ impl MediaFoundation {
             }
             let _ = buffer.Unlock();
         }
+        self.pictures += 1;
         Ok(())
     }
 }
@@ -442,6 +464,21 @@ fn aperture(t: &IMFMediaType, key: &GUID) -> Option<(u32, u32, u32, u32)> {
 
 impl Decode for MediaFoundation {
     fn decode(&mut self, annexb: &[u8]) -> Result<Option<Frame<'_>>, String> {
+        if let Some(size) = super::sps_size(annexb) {
+            if self.size != Some(size) {
+                if self.size.is_some() {
+                    // A new picture size: a decoder set up for it, rather
+                    // than a format change in the middle of the stream.
+                    *self = MediaFoundation::new()?;
+                }
+                self.configure(size)?;
+                self.size = Some(size);
+            }
+        }
+        if self.size.is_none() {
+            // Nothing decodes before a sequence parameter set.
+            return Ok(None);
+        }
         let sample = self.input_sample(annexb)?;
         let mut got = false;
         loop {
