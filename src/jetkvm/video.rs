@@ -170,8 +170,8 @@ fn draw_status(host: &Host, title: &str, detail: &str) {
         d.set_size(w, h);
     }
     let (buf, stride) = d.buffer_mut();
-    for px in buf.chunks_exact_mut(4) {
-        px.copy_from_slice(&STATUS_BACKGROUND);
+    for px in buf.as_chunks_mut::<4>().0 {
+        *px = STATUS_BACKGROUND;
     }
     let (w, h) = (w as usize, h as usize);
     // As large as fits in three quarters of the width, up to a limit.
@@ -317,6 +317,6 @@ mod tests {
             10,
             [1, 2, 3, 4],
         );
-        assert!(buf.chunks_exact(4).any(|p| p == [1, 2, 3, 4]));
+        assert!(buf.as_chunks::<4>().0.contains(&[1, 2, 3, 4]));
     }
 }

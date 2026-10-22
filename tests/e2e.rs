@@ -454,8 +454,10 @@ fn no_signal_shows_a_status_picture() {
     assert_eq!(pixel(&s, 1280, 0, 0), STATUS_BACKGROUND);
     let text = s
         .pixels()
-        .chunks_exact(4)
-        .filter(|p| *p == STATUS_TEXT)
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|p| **p == STATUS_TEXT)
         .count();
     assert!(text > 100, "no title drawn ({text} pixels)");
     disconnect(c);

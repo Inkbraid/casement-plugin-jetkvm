@@ -68,10 +68,12 @@ fn rows(
     let odd = y0.len() % 2 == 1;
     match (y1, o1) {
         (Some(y1), Some(o1)) => {
-            let pairs = y0
-                .chunks_exact(2)
-                .zip(y1.chunks_exact(2))
-                .zip(o0.chunks_exact_mut(8).zip(o1.chunks_exact_mut(8)));
+            let pairs = y0.as_chunks::<2>().0.iter().zip(y1.as_chunks::<2>().0).zip(
+                o0.as_chunks_mut::<8>()
+                    .0
+                    .iter_mut()
+                    .zip(o1.as_chunks_mut::<8>().0),
+            );
             for (((a, b), (oa, ob)), (u, v)) in pairs.zip(&mut uv) {
                 let c = chroma(u, v);
                 oa[..4].copy_from_slice(&pack(a[0], c));
@@ -86,7 +88,8 @@ fn rows(
             }
         }
         _ => {
-            for ((a, oa), (u, v)) in y0.chunks_exact(2).zip(o0.chunks_exact_mut(8)).zip(&mut uv) {
+            let pairs = y0.as_chunks::<2>().0.iter().zip(o0.as_chunks_mut::<8>().0);
+            for ((a, oa), (u, v)) in pairs.zip(&mut uv) {
                 let c = chroma(u, v);
                 oa[..4].copy_from_slice(&pack(a[0], c));
                 oa[4..].copy_from_slice(&pack(a[1], c));
@@ -132,7 +135,13 @@ impl Frame<'_> {
                 }
                 Chroma::Interleaved { uv, stride } => {
                     let c = &uv[span(crow, stride, cx * 2, cw * 2)];
-                    rows(y0, y1, c.chunks_exact(2).map(|p| (p[0], p[1])), o0, o1);
+                    rows(
+                        y0,
+                        y1,
+                        c.as_chunks::<2>().0.iter().map(|&[u, v]| (u, v)),
+                        o0,
+                        o1,
+                    );
                 }
             }
         }
