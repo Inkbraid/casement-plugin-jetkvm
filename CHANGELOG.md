@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.0 (2026-10-23)
 
 - JetKVM devices: password login (`auth_failed` for a wrong or missing
   password, the device's login lock-out reported), HTTPS with certificate
